@@ -70,16 +70,25 @@ CoolLink.prototype.initCommonSensors = function() {
         .on('get', this.getAirQuality.bind(this));
     
     // Fan v2
-    this.fanv2 = new Service.Fanv2(this.name);
+    this.fanv2 = new Service.AirPurifier(this.name);
     this.fanv2
     .getCharacteristic(Characteristic.Active)
     .on('get', this.isFanOn.bind(this))
     .on('set', this.setFan.bind(this))
     .eventEnabled = true;
     this.fanv2
-    .getCharacteristic(Characteristic.TargetFanState)
+    .getCharacteristic(Characteristic.TargetAirPurifierState)
     .on('get', this.isAutoOn.bind(this))
     .on('set', this.setAuto.bind(this))
+    .eventEnabled = true;
+    this.fanv2
+    .getCharacteristic(Characteristic.CurrentAirPurifierState)
+    .on('get', this.isFanState.bind(this))
+    .eventEnabled = true;
+    this.fanv2
+    .addCharacteristic(Characteristic.AirQuality)
+    .on('get', this.getQualityTarget.bind(this))
+    .on('set', this.setQualityTarget.bind(this))
     .eventEnabled = true;
     this.fanv2
     .getCharacteristic(Characteristic.RotationSpeed)
@@ -92,12 +101,23 @@ CoolLink.prototype.initCommonSensors = function() {
     .on('set', this.setRotation.bind(this));
     this.fanv2
     .addCharacteristic(Characteristic.NightVision)
-        .on('get', this.isNightOn.bind(this))
-        .on('set', this.setNight.bind(this));
+    .on('get', this.isNightOn.bind(this))
+    .on('set', this.setNight.bind(this));
+    // Filter Maintenance
+    this.filter = new Service.FilterMaintenance(this.name);
+    this.filter
+    .getCharacteristic(Characteristic.FilterChangeIndication)
+    .on('get', this.getFilterChangeIndication.bind(this))
+    .eventEnabled = true;
+    this.filter
+    .getCharacteristic(Characteristic.FilterLifeLevel)
+    .on('get', this.getFilterLifeLevel.bind(this))
+    .eventEnabled = true;
 }
 CoolLink.prototype.getServices = function() {
     return [
         this.fanv2,
+            this.filter,
         this.temperature_sensor,
         this.humidity_sensor,
         this.air_quality_sensor,
@@ -138,6 +158,28 @@ CoolLink.prototype.getRelativeHumidity = function(callback) {
     });
     this.requestCurrentState();
 }
+CoolLink.prototype.getFilterLifeLevel = function(callback) {
+    var that = this;
+    this.json_emitter.once('state', (json) => {
+                           var filter_life_level = Math.round((json['product-state']['filf']/4380)*100);
+                           that.log("Filter Life:", filter_life_level, "%");
+                           callback(null, filter_life_level);
+                           });
+    this.requestCurrentState();
+}
+CoolLink.prototype.getFilterChangeIndication = function(callback) {
+    var that = this;
+    this.json_emitter.once('state', (json) => {
+                           var filter_life_level = Math.round((json['product-state']['filf']/4380)*100);
+                           that.log("Filter Life:", filter_life_level, "%");
+                           var filter_change_indication = 0;
+                           if (filter_life_level < 10) {
+                                filter_change_indication = 1;
+                           };
+                           callback(null, filter_change_indication);
+                           });
+    this.requestCurrentState();
+}
 CoolLink.prototype.getAirQuality = function(callback) {
     var that = this;
     this.json_emitter.once('sensor', (json) => {
@@ -146,6 +188,25 @@ CoolLink.prototype.getAirQuality = function(callback) {
         callback(null, air_quality);
     });
     this.requestCurrentState();
+}
+CoolLink.prototype.getQualityTarget = function(callback) {
+    var that = this;
+    this.json_emitter.once('state', (json) => {
+                           var target_quality = json['product-state']['qtar'];
+                           that.log("Target Quality:", target_quality);
+                           callback(null, target_quality);
+                           });
+    this.requestCurrentState();
+}
+CoolLink.prototype.setQualityTarget = function(callback) {
+    var that = this;
+    var qtar = Math.round(value);
+    var message = '{"msg":"STATE-SET","time":"' + now.toISOString() + '","data":{"qtar":"' + qtar + '"}}'
+    this.mqtt_client.publish(
+                             this.getCommandTopic(),
+                             message
+                             );
+    this.getQualityTarget(callback);
 }
 CoolLink.prototype.isFanOn = function(callback) {
     var that = this;
@@ -157,6 +218,23 @@ CoolLink.prototype.isFanOn = function(callback) {
     });
     this.requestCurrentState();
 }
+CoolLink.prototype.isFanState = function(callback) {
+    var that = this;
+    this.json_emitter.once('state', (json) => {
+                           var fnst = json['product-state']['fnst']
+                           that.log("Fan State:", fnst);
+                           var fmod = json['product-state']['fmod'];
+                           var on = 2;
+                            if (fnst == "OFF") {
+                                on = 0;
+                                if (fmod == "AUTO") {
+                                    on = 1;
+                                };
+                            };
+                            callback(null, on);
+                           });
+    this.requestCurrentState();
+}
 CoolLink.prototype.setFan = function(value, callback) {
     var that = this;
     var now = new Date();
@@ -166,7 +244,12 @@ CoolLink.prototype.setFan = function(value, callback) {
         this.getCommandTopic(),
         message
     );
-    this.fanv2.getCharacteristic(Characteristic.TargetFanState).updateValue(false);
+    this.fanv2.getCharacteristic(Characteristic.TargetAirPurifierState).updateValue(false);
+    if (fmod == "FAN") {
+        this.fanv2.getCharacteristic(Characteristic.CurrentAirPurifierState).updateValue(2);
+    } else {
+        this.fanv2.getCharacteristic(Characteristic.CurrentAirPurifierState).updateValue(0);
+    };
     this.isFanOn(callback);
 }
 CoolLink.prototype.getFanRotationSpeed = function(callback) {
@@ -188,8 +271,9 @@ CoolLink.prototype.setFanRotationSpeed = function(value, callback) {
         this.getCommandTopic(),
         message
     );
-    this.fanv2.getCharacteristic(Characteristic.TargetFanState).updateValue(false);
+    this.fanv2.getCharacteristic(Characteristic.TargetAirPurifierState).updateValue(false);
     this.fanv2.getCharacteristic(Characteristic.Active).updateValue(true);
+    this.fanv2.getCharacteristic(Characteristic.CurrentAirPurifierState).updateValue(2);
     this.getFanRotationSpeed(callback);
 }
 CoolLink.prototype.isAutoOn = function(callback) {
@@ -212,6 +296,11 @@ CoolLink.prototype.setAuto = function(value, callback) {
         message
     );
     this.fanv2.getCharacteristic(Characteristic.Active).updateValue(false);
+    if (fmod=="OFF") {
+        this.fanv2.getCharacteristic(Characteristic.CurrentAirPurifierState).updateValue(0);
+    } else {
+        this.fanv2.getCharacteristic(Characteristic.CurrentAirPurifierState).updateValue(2);
+    };
     this.isAutoOn(callback);
 }
 
